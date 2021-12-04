@@ -9,10 +9,13 @@ import pandas as pd
 
 BLOCK_GENESIS = b'f9beb4d9676574626c6f636b730000004500000084f4958d7f110100016fe28c0ab6f1b372c1a6a246ae63f74f931e8365e15a089c68d61900000000000000000000000000000000000000000000000000000000000000000000000000'
 
+# arbitrary number
+ID = 1111111
+MY_BLOCK = ID % 10000
+
 BTC_HOST = '67.210.228.203'  # arbitrary choice from makeseed
 BTC_PORT = 8333
 
-MY_BLOCK = 2063309 % 10000
 
 
 class BTC_explorer(object):
@@ -44,7 +47,13 @@ class BTC_explorer(object):
         print("BTC block explorer")
 
 
+        self.completed_length = 0
+
         self.askBlocks = False
+        self.next_block_hash = None
+        self.block_height = 0
+
+        self.ask_for_data = False
 
     def create_version_message(self):
 
@@ -216,7 +225,49 @@ class BTC_explorer(object):
 
         return self.makeMessage(magic, command, payload)
 
-    #get_blocks_msg([BLOCK_GENESIS]).hex()
+
+
+    def create_get_data_message(self):
+
+        # variable need to use compact size
+        inventory_count = self.compactsize_t(1)
+
+        # 32 or more bytes locator hashes
+        inventory_vector = self.next_block_hash
+
+        payload = inventory_count + inventory_vector
+
+        # specifies what network we are using (Connecting to MainNet)
+        magic = bytes.fromhex("F9BEB4D9")
+
+        # identifies packet content, needs to be 12 characters long
+        command = b"getdata" + 5 * b"\00"
+        self.send_command = command
+
+        made_msg = self.makeMessage(magic, command, payload)
+
+        header_contents = [self.send_magic.hex() + " - Main-net",
+                           self.send_command.rstrip(b'x\00'),
+                           len(payload),
+                           self.send_checksum.hex(), payload]
+
+        data = {'Field': ['Magic', 'Command', 'Length', 'Checksum',
+                          'Payload'
+                          ],
+                'Data': header_contents
+                }
+
+        df = pd.DataFrame(data)
+        print("-------------SENDING GETDATA MESSAGE------------------")
+        print(df.to_string(index=False))
+
+        return made_msg
+
+    @staticmethod
+    def get_payload_len(message):
+
+        recv_length = struct.unpack("I", message[16:20])[0]
+        return recv_length
 
     def decode_recv_header(self, message):
         # Encode the magic number
@@ -309,10 +360,13 @@ class BTC_explorer(object):
         print("COUNT OF INV: {}".format(num_hashes))
         print("Count Bytes: {}".format(count_bytes))
 
-        message = message[num_hashes:]
+        message = message[len(count_bytes):]
         hashes = [message[i:i+36] for i in range(0, len(message), 36)]
 
-        print(hashes)
+        return hashes, num_hashes
+
+    def decode_recv_block(self, message):
+        print("")
 
 
 
@@ -371,11 +425,32 @@ class BTC_explorer(object):
                 return
 
             if self.received_command == 'inv':
-                print("handle it")
-                print(message)
-                print(len(message))
+                #print(message)
+                print("Length of message on INV: {}".format(len(message)))
 
-                self.decode_recv_inv(message)
+                hashes, num_hashes = self.decode_recv_inv(message)
+
+                blockfound = False
+                if self.block_height + num_hashes >= MY_BLOCK:
+                    self.askBlocks = False
+                    print("My block is somwhere inside this data")
+                    blockfound = True
+                else:
+                    # block number is larger
+                    self.block_height += num_hashes
+                    self.askBlocks = True
+
+                block_hash, self.next_block_hash = self.filter_hashes(hashes, blockfound)
+
+                self.payload_inbound = False
+
+                return
+
+            if self.received_command == 'block':
+                print("DECODING BLOCK MESSAGE")
+                print("Length of block message: {}".format(len(message)))
+
+
 
                 self.payload_inbound = False
                 return
@@ -383,11 +458,43 @@ class BTC_explorer(object):
             print("THE CURRENT COMMAND: {}".format(self.received_command))
 
 
-
             #TODO need to be able to handle new data overriding current existing
             # data in the buffer
             #else:
             #    print("Different command: {}".format(self.received_command))
+
+    def filter_hashes(self, hashes, blockfound):
+
+        # Get the last hash (500th block hash) from the list of hashes
+
+        print("Number of hashes: {}".format(len(hashes)))
+
+        if blockfound:
+            myblock_idx = MY_BLOCK % len(hashes)
+            hashite = hashes[MY_BLOCK % len(hashes)]
+            self.block_height += myblock_idx
+            print("Block {} has been found".format(self.block_height))
+        else:
+            hashite = hashes[-1]
+
+        #for hashite in hashes:
+        print(hashite)
+        type = self.unmarshal_uint(hashite[:4])
+        block_hash = hashite[4:]
+
+        #type, block_hash = self.unmarshal_compactsize(hash)
+        block_hash = self.swapLittle(block_hash).hex()
+
+        print("INV - MESSAGE TYPE: {}".format(type))
+        print("INV - BLOCK HASH: {}".format(block_hash))
+
+        return block_hash, hashite
+
+
+    def swapLittle(self, hash):
+        temp = bytearray(hash).fromhex(hash.hex())
+        temp.reverse()
+        return temp
 
     # TODO need to use this to check the checksum
     def print_header(self, header, expected_cksum=None):
@@ -481,26 +588,48 @@ BTC_EXPLORER.peerSocket.send(version_msg)
 
 while True:
 
-    recv_message = BTC_EXPLORER.peerSocket.recv(1024) #8192
+    # TODO create a single buffer to collect everything
+    buffer = b''
+
+    recv_message = BTC_EXPLORER.peerSocket.recv(8192)
     #print("RECV MESSAGE: {}\n".format(recv_message))
 
-    message_size = len(recv_message)
-    print("\nRECEIVED MESSAGE SIZE: {}\n".format(message_size))
 
+    # LITERALLY TO HANDLE THE INVENTORY MESSAGE
+    message_size = len(recv_message)
+    print("\nRECEIVED MESSAGE SIZE: {}".format(message_size))
+    if message_size > 500:
+        header = recv_message[:24]
+        total_message_size = BTC_EXPLORER.get_payload_len(header)
+
+        recv_message = recv_message[24:]
+        print("Expected Size: {}".format(total_message_size))
+        buffer += recv_message
+        print("length of buffer: {}".format(len(buffer)))
+        while total_message_size != len(buffer):
+            print("length of buffer: {}".format(len(buffer)))
+            recv_message = BTC_EXPLORER.peerSocket.recv(8192)
+            buffer += recv_message
+        recv_message = header + buffer
+        #BTC_EXPLORER.ask_for_data = True
+
+    print("default request")
     BTC_EXPLORER.recv_peer_message(recv_message, message_size)
 
-    """
-    try:
-        BTC_EXPLORER.recv_peer_message(recv_message, message_size)
-    except Exception as e:
-        print("ERROR:{}\n".format(e))
-    """
+
+    if BTC_EXPLORER.ask_for_data:
+        print("\nCREATING GETDATA MESSAGE")
+        getdata_message = BTC_EXPLORER.create_get_data_message()
+
+        print("message made")
+        BTC_EXPLORER.peerSocket.send(getdata_message)
 
     if BTC_EXPLORER.askBlocks:
         print("\nCREATING GETBLOCKS MESSAGE")
         getblocks_msg = BTC_EXPLORER.create_get_block_message()
         BTC_EXPLORER.peerSocket.send(getblocks_msg)
         BTC_EXPLORER.askBlocks = False
+        BTC_EXPLORER.extra_message = None
 
     # decode additional messages passed through socket
     if BTC_EXPLORER.extra_message:
