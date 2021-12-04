@@ -7,8 +7,12 @@ import hashlib
 
 import pandas as pd
 
+BLOCK_GENESIS = b'f9beb4d9676574626c6f636b730000004500000084f4958d7f110100016fe28c0ab6f1b372c1a6a246ae63f74f931e8365e15a089c68d61900000000000000000000000000000000000000000000000000000000000000000000000000'
+
 BTC_HOST = '67.210.228.203'  # arbitrary choice from makeseed
 BTC_PORT = 8333
+
+MY_BLOCK = 2063309 % 10000
 
 
 class BTC_explorer(object):
@@ -31,10 +35,16 @@ class BTC_explorer(object):
         self.received_command = None
 
         self.received_length = None
+
+        self.message_remainder = None
+
         self.extra_message = None
         self.read_fullMessage = False
         self.received_verack = False
         print("BTC block explorer")
+
+
+        self.askBlocks = False
 
     def create_version_message(self):
 
@@ -185,7 +195,19 @@ class BTC_explorer(object):
 
     def create_get_block_message(self):
 
-        payload = b""
+        # unsigned integer 4 bytes long == L
+        version = struct.pack("i", 70015)
+
+        # 1 or more bytes
+        hashcount = struct.pack("i", 1)
+
+        # 32 or more bytes locator hashes
+        block_locator = BLOCK_GENESIS
+
+        # 32 bytes
+        hashstop = self.uint32_t(0)
+
+        payload = version + hashcount + block_locator + hashstop
 
         # specifies what network we are using (Connecting to MainNet)
         magic = bytes.fromhex("F9BEB4D9")
@@ -194,6 +216,8 @@ class BTC_explorer(object):
         command = b"getblocks" + 3 * b"\00"
 
         return self.makeMessage(magic, command, payload)
+
+    #get_blocks_msg([BLOCK_GENESIS]).hex()
 
     def decode_recv_header(self, message):
         # Encode the magic number
@@ -250,6 +274,7 @@ class BTC_explorer(object):
         i = 80 + len(user_agent_size)
         user_agent = message[i:i + uasz]  # user agent
         i += uasz
+
         start_height = message[i:i + 4].hex()  # start height
         relay = message[i + 4:i + 5].hex()  # relay
         extra = message[i + 5:]  # extra bits
@@ -277,10 +302,12 @@ class BTC_explorer(object):
 
     def recv_peer_message(self, message, size):
 
-        if size < 24:
+        if size <= 0:
             print("UNKNOWN MESSAGE: {}".format(message))
             return
 
+
+        # if there's no payload coming keep grabbing headers
         if not self.payload_inbound:
             # decode and print out header message
             self.decode_recv_header(message[:24])
@@ -297,11 +324,36 @@ class BTC_explorer(object):
 
             if self.received_command == 'sendcmpct':
                 # truncate the message
-                message = message[self.received_length:]
+                self.message_remainder = message[self.received_length:]
                 self.payload_inbound = False
-                self.extra_message = message
-                print("THE REMAINDER")
-                print(self.extra_message)
+                self.recv_peer_message(self.message_remainder, len(self.message_remainder))
+                return
+
+            if self.received_command == 'ping':
+                self.message_remainder = message[self.received_length:]
+                self.payload_inbound = False
+                self.recv_peer_message(self.message_remainder, len(self.message_remainder))
+                return
+
+            if self.received_command == 'addr':
+                self.message_remainder = message[self.received_length:]
+                self.payload_inbound = False
+                self.recv_peer_message(self.message_remainder, len(self.message_remainder))
+                return
+
+            if self.received_command == 'feefilter':
+                self.message_remainder = message[self.received_length:]
+                self.payload_inbound = False
+                print("WTF: {}".format(len(self.message_remainder)))
+                self.recv_peer_message(self.message_remainder, len(self.message_remainder))
+
+                self.askBlocks = True
+
+                return
+
+
+            #TODO need to be able to handle new data overriding current existing
+            # data in the buffer
 
             else:
                 print("Different command: {}".format(self.received_command))
@@ -392,9 +444,13 @@ while True:
         print("\nCREATING VERACK MESSAGE")
         verack_msg = BTC_EXPLORER.create_verAck_message()
         BTC_EXPLORER.peerSocket.send(verack_msg)
-        BTC_EXPLORER.received_version = False
         BTC_EXPLORER.read_fullMessage = False
 
+    if BTC_EXPLORER.askBlocks:
+        print("\nCREATING GETBLOCKS MESSAGE")
+        getblocks_msg = BTC_EXPLORER.create_get_block_message()
+        BTC_EXPLORER.peerSocket.send(getblocks_msg)
+        BTC_EXPLORER.askBlocks = False
 
 
 
