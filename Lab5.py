@@ -108,7 +108,6 @@ class BTC_explorer(object):
         # 2 byte long big endian number, 8333 default for bitcoin
         address_recv_port = struct.pack(">H", 8333)
 
-        # TODO is this where I add bitcoin host id?
         address_transmitting_services = struct.pack("Q", 0)
 
         addr_me = "127.0.0.1".encode()
@@ -247,6 +246,9 @@ class BTC_explorer(object):
                 'Data': message_contents
                 }
 
+        if self.received_command == 'inv':
+            self.askBlocks = False
+
         print("\n------------RECV-HEADER------------")
         df = pd.DataFrame(data)
         print(df.to_string(index=False))
@@ -300,27 +302,44 @@ class BTC_explorer(object):
         self.payload_inbound = False
         self.extra_message = extra
 
+    def decode_recv_inv(self, message):
+        print("")
+
+        count_bytes, num_hashes = self.unmarshal_compactsize(message)
+        print("COUNT OF INV: {}".format(num_hashes))
+        print("Count Bytes: {}".format(count_bytes))
+
+        message = message[num_hashes:]
+        hashes = [message[i:i+36] for i in range(0, len(message), 36)]
+
+        print(hashes)
+
+
+
     def recv_peer_message(self, message, size):
 
         if size <= 0:
             print("UNKNOWN MESSAGE: {}".format(message))
             return
 
-
         # if there's no payload coming keep grabbing headers
         if not self.payload_inbound:
             # decode and print out header message
             self.decode_recv_header(message[:24])
-
+            message = message[24:]
             # if there's a payload with the message
             if self.received_length > 0:
                 # truncate message header, only payload should remain
-                message = message[24:]
+                #message = message[24:]
                 self.payload_inbound = True
+
+        #m = message
+        #print("MESSAGE AFTER HEADER: {}".format(message))
 
         if len(message) > 0:
             if self.received_command == 'version':
                 self.decode_recv_version_payload(message)
+
 
             if self.received_command == 'sendcmpct':
                 # truncate the message
@@ -351,12 +370,57 @@ class BTC_explorer(object):
 
                 return
 
+            if self.received_command == 'inv':
+                print("handle it")
+                print(message)
+                print(len(message))
+
+                self.decode_recv_inv(message)
+
+                self.payload_inbound = False
+                return
+
+            print("THE CURRENT COMMAND: {}".format(self.received_command))
+
+
 
             #TODO need to be able to handle new data overriding current existing
             # data in the buffer
+            #else:
+            #    print("Different command: {}".format(self.received_command))
 
-            else:
-                print("Different command: {}".format(self.received_command))
+    # TODO need to use this to check the checksum
+    def print_header(self, header, expected_cksum=None):
+        """
+        Report the contents of the given bitcoin message header
+        :param header: bitcoin message header (bytes or bytearray)
+        :param expected_cksum: the expected checksum for this version message, if known
+        :return: message type
+        """
+        magic =header[:4]
+        command_hex =header[4:16]
+        payload_size = header[16:20]
+        cksum = header[20:]
+
+        command = str(bytearray([b for b in command_hex if b != 0]),
+                      encoding='utf-8')
+        psz = self.unmarshal_uint(payload_size)
+        if expected_cksum is None:
+            verified = ''
+        elif expected_cksum == cksum:
+            verified = '(verified)'
+        else:
+            verified = '(WRONG!! ' + expected_cksum.hex() + ')'
+        prefix = '  '
+        print(prefix + 'HEADER')
+        print(prefix + '-' * 56)
+        prefix *= 2
+        print('{}{:32} magic'.format(prefix, magic.hex()))
+        print('{}{:32} command: {}'.format(prefix, command_hex.hex(), command))
+        print(
+            '{}{:32} payload size: {}'.format(prefix, payload_size.hex(), psz))
+        print('{}{:32} checksum {}'.format(prefix, cksum.hex(), verified))
+        return command
 
 
     def btc_peer_connection(self):
@@ -417,7 +481,7 @@ BTC_EXPLORER.peerSocket.send(version_msg)
 
 while True:
 
-    recv_message = BTC_EXPLORER.peerSocket.recv(8192) #8192
+    recv_message = BTC_EXPLORER.peerSocket.recv(1024) #8192
     #print("RECV MESSAGE: {}\n".format(recv_message))
 
     message_size = len(recv_message)
@@ -432,10 +496,17 @@ while True:
         print("ERROR:{}\n".format(e))
     """
 
+    if BTC_EXPLORER.askBlocks:
+        print("\nCREATING GETBLOCKS MESSAGE")
+        getblocks_msg = BTC_EXPLORER.create_get_block_message()
+        BTC_EXPLORER.peerSocket.send(getblocks_msg)
+        BTC_EXPLORER.askBlocks = False
+
     # decode additional messages passed through socket
     if BTC_EXPLORER.extra_message:
         BTC_EXPLORER.recv_peer_message(BTC_EXPLORER.extra_message,
                                        len(BTC_EXPLORER.extra_message))
+
 
     # check if version message was received if so send a verack message
     time.sleep(1)
@@ -446,11 +517,6 @@ while True:
         BTC_EXPLORER.peerSocket.send(verack_msg)
         BTC_EXPLORER.read_fullMessage = False
 
-    if BTC_EXPLORER.askBlocks:
-        print("\nCREATING GETBLOCKS MESSAGE")
-        getblocks_msg = BTC_EXPLORER.create_get_block_message()
-        BTC_EXPLORER.peerSocket.send(getblocks_msg)
-        BTC_EXPLORER.askBlocks = False
 
 
 
