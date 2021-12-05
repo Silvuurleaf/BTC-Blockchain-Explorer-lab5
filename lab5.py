@@ -589,7 +589,6 @@ class BTC_explorer(object):
         if expected_check_sum == checksum:
             return True
 
-
     def btc_peer_connection(self):
         self.peerSocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
