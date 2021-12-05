@@ -3,8 +3,25 @@ import struct
 import time
 import socket
 import hashlib
-
 import pandas as pd
+
+
+"""
+Mark Taylor
+
+BTC Blockchain explorer Lab 5
+
+Follows bitcoin communication protocol and communicates with a fixed
+BTC peer on the network. 
+- Sends/recv version message to connect to peer
+- sends/recv verack messages
+- recvs & ignores: sendcmpct, feefilter, ping, addr, sendheader mgs
+- Sends getblock messages starting from genesis block to find fixed
+    block in the network MY_BLOCK
+- recvs inventory messages and searches the hashes till it finds desired block
+
+"""
+
 
 BLOCK_GENESIS = b'f9beb4d9676574626c6f636b730000004500000084f4958d7f1101000' \
                 b'16fe28c0ab6f1b372c1a6a246ae63f74f931e8365e15a089c68d61900' \
@@ -35,8 +52,12 @@ class BTC_explorer(object):
 
         self.send_checksum = None           # hash id for payload for sender
 
+        self.received_checksum = None       # checksum for incoming messages
+
         self.recvDF = None                  # Pandas dataframe for the msg being
                                             # received
+
+        self.current_header_DF = None       # store header for messages
 
         self.payload_inbound = False        # Did the header specify a payload
 
@@ -56,13 +77,20 @@ class BTC_explorer(object):
         self.received_verack = False        # boolean if peer has sent a verack
                                             # in response to our version msg
 
-        #self.completed_length = 0          #
 
-        self.askBlocks = False
-        self.next_block_hash = None
-        self.block_height = 0
+        self.askBlocks = False              # boolean if we need to send an
+                                            # ask block message to peer
 
-        self.ask_for_data = False
+        self.next_block_hash = None         # store block hash locator for
+                                            # getblocks or getdata
+
+        self.block_height = 0               # block height or block number
+
+        self.ask_for_data = False           # boolean if we need to send a
+                                            # getdata message
+
+        self.MY_BLOCK_FOUND = False         # state variable for when specified
+                                            # block is found
 
     def create_version_message(self):
 
@@ -76,13 +104,20 @@ class BTC_explorer(object):
 
         message = self.makeMessage(self.send_magic, self.send_command, payload)
 
+        verified = self.verify_checksum(self.send_checksum,
+                                        self.make_checksum(payload))
+        if verified:
+            verified_checksum = self.send_checksum.hex()
+        else:
+            verified_checksum = self.send_checksum.hex() + " NOT VERIFIED"
+
         header_contents = [self.send_magic.hex() + " - Main-net",
-                           self.send_command.rstrip(b'x\00'),
+                           self.send_command.rstrip(b'x\00').decode("utf-8"),
                            len(payload),
-                           self.send_checksum.hex(), 0]
+                           verified_checksum,
+                           ]
 
         data = {'Field': ['Magic', 'Command', 'Length', 'Checksum',
-                          'Payload'
                           ],
                 'Data': header_contents
                 }
@@ -97,82 +132,112 @@ class BTC_explorer(object):
 
     def create_version_payload(self):
 
+        MY_VERSION = 70015
+        MY_SERVICES = 0
+        MY_TIMESTAMP = int(time.time())
+        PEER_SERVICES = 0
+        PEER_ADDRESS = "127.0.0.1"
+
+        MY_ADDRESS = "127.0.0.1"
+        MY_PORT = BTC_PORT
+
+        NONCE = random.getrandbits(64)
+        USER_AGENT = ''
+        USER_AGENT_SIZE = 0
+        STARTING_HEIGHT = 0
+        RELAY = "FALSE"
+
         # https://developer.bitcoin.org/reference/p2p_networking.html#protocol-versions
         # Highest protocol version: 70015 Bitcoin Core 0.18.0 found above ^^^^
 
         # unsigned integer 4 bytes long == L
-        version = struct.pack("i", 70015)
+        version = struct.pack("i", MY_VERSION)
 
         # 8 byte unsigned long integer
         # 0x0 unamed node, so the peer we connect to won't ask us for data
-        services = struct.pack("Q", 0)
+        services = struct.pack("Q", MY_SERVICES)
 
-        # 8 byte integer
-        # provide timestamp
-        timestamp = struct.pack("q", int(time.time()))
+        # 8 byte integer, of my timestamp
+        timestamp = struct.pack("q", MY_TIMESTAMP)
 
         # provide the address of the receiving node
         # 8 byte integer for receiving address
 
         # services
-        address_recv_services = struct.pack("Q", 0)
+        address_recv_services = struct.pack("Q", PEER_SERVICES)
         # recv ip address: 16 char long in big endian byte order (>)
 
-        addr_you = "127.0.0.1".encode()
+        addr_you = PEER_ADDRESS.encode()
         # pass in localhost address
         address_recv_ip = struct.pack(">16s", addr_you)
 
         # port associated with receiving address
         # 2 byte long big endian number, 8333 default for bitcoin
-        address_recv_port = struct.pack(">H", 8333)
+        address_recv_port = struct.pack(">H", BTC_PORT)
 
         address_transmitting_services = struct.pack("Q", 0)
 
         addr_me = "127.0.0.1".encode()
         address_transmitting_ip = struct.pack(">16s", addr_me)
-        address_transmitting_port = struct.pack(">H", 8333)
+        address_transmitting_port = struct.pack(">H", BTC_PORT)
 
         # 8 byte integer: nonce
-        nonce = struct.pack("Q", random.getrandbits(64))
+        nonce = struct.pack("Q", NONCE)
 
         # user agent (string): tells what type of node we are running
-        user_agent_bytes = struct.pack("B", 0)
+        user_agent_bytes = struct.pack("B", USER_AGENT_SIZE)
 
         # 4 byte integer: starting height: 710668 11:34pm 11/20/21
-        starting_height = struct.pack("i", 710668)
+        # can start out at 0
+        starting_height = struct.pack("i", 0)
 
         # ignore incoming messages flag
         relay = struct.pack("?", False)
 
-        message_contents = [version, services, timestamp,
-                            address_recv_services, address_recv_ip,
-                            address_recv_port, address_transmitting_services,
-                            address_transmitting_ip, address_transmitting_port,
-                            nonce, user_agent_bytes, starting_height, relay]
+        message_contents = [version.hex(), services.hex(), timestamp.hex(),
+                            address_recv_services.hex(), address_recv_ip.hex(),
+                            address_recv_port.hex(),
+                            address_transmitting_services.hex(),
+                            address_transmitting_ip.hex(),
+                            address_transmitting_port.hex(),
+                            nonce, user_agent_bytes.hex(), starting_height.hex()
+                            , relay.hex()]
 
-        data = {'Field': ['Version', 'My Services', 'Sender Timestamp',
-                          'Peer Services', 'Peer Host', 'Peer Port',
-                          'My Services 2', 'My Host', 'My Port', 'Nonce',
-                          'User Agent Bytes', 'Start Height', 'Relay'
+        data = {'Field': ['Version: ' + str(MY_VERSION),
+                          'My Services: ' + str(MY_SERVICES),
+                          'Sender Timestamp: ' + str(MY_TIMESTAMP),
+                          'Peer Services: ' + str(PEER_SERVICES),
+                          'Peer Host: ' + str(PEER_ADDRESS),
+                          'Peer Port: ' + str(BTC_PORT),
+                          'My Services 2: ' + str(MY_SERVICES),
+                          'My Host: ' + str(MY_ADDRESS),
+                          'My Port: ' + str(BTC_PORT),
+                          'Nonce: ' + str(NONCE),
+                          'User Agent Bytes: ' + str(USER_AGENT_SIZE),
+                          'Start Height: ' + str(STARTING_HEIGHT),
+                          'Relay: ' + str(RELAY)
                           ],
+
                 'Data': message_contents
                 }
 
         self.senderPayloadDF = pd.DataFrame(data)
 
         payload = version + services + timestamp + address_recv_services + \
-                  address_recv_ip + address_recv_port + address_transmitting_services + \
-                  address_transmitting_ip + address_transmitting_port + nonce + \
-                  user_agent_bytes + starting_height + relay
+                  address_recv_ip + address_recv_port + \
+                  address_transmitting_services + \
+                  address_transmitting_ip + address_transmitting_port +\
+                  nonce + user_agent_bytes + starting_height + relay
 
         return payload
 
+    def make_checksum(self, payload):
+        return hashlib.sha256(hashlib.sha256(payload).digest()).digest()[:4]
 
     def makeMessage(self, magic, command, payload):
 
         # checksum, first 4 bytes of sha256(sha256(payload))
-        self.send_checksum = hashlib.sha256(
-            hashlib.sha256(payload).digest()).digest()[:4]
+        self.send_checksum = self.make_checksum(payload)
 
         # 4 byte integer represent length of payload in # bytes
         length = struct.pack("I", len(payload))
@@ -197,11 +262,9 @@ class BTC_explorer(object):
         header_contents = [self.send_magic.hex() + " - Main-net",
                            self.send_command.rstrip(b'x\00'),
                            len(payload),
-                           self.send_checksum.hex(), payload]
+                           self.send_checksum.hex()]
 
-        data = {'Field': ['Magic', 'Command', 'Length', 'Checksum',
-                          'Payload'
-                          ],
+        data = {'Field': ['Magic', 'Command', 'Length', 'Checksum'],
                 'Data': header_contents
                 }
 
@@ -240,11 +303,9 @@ class BTC_explorer(object):
         header_contents = [self.send_magic.hex() + " - Main-net",
                            self.send_command.rstrip(b'x\00'),
                            len(payload),
-                           self.send_checksum.hex(), payload]
+                           self.send_checksum.hex()]
 
-        data = {'Field': ['Magic', 'Command', 'Length', 'Checksum',
-                          'Payload'
-                          ],
+        data = {'Field': ['Magic', 'Command', 'Length', 'Checksum'],
                 'Data': header_contents
                 }
 
@@ -253,8 +314,6 @@ class BTC_explorer(object):
         print(df.to_string(index=False))
 
         return made_msg
-
-
 
     def create_get_data_message(self):
 
@@ -386,8 +445,9 @@ class BTC_explorer(object):
         print("")
 
         count_bytes, num_hashes = self.unmarshal_compactsize(message)
-        print("COUNT OF INV: {}".format(num_hashes))
-        print("Count Bytes: {}".format(count_bytes))
+
+        #print("COUNT OF INV: {}".format(num_hashes))
+        #print("Count Bytes: {}".format(count_bytes))
 
         message = message[len(count_bytes):]
         hashes = [message[i:i+36] for i in range(0, len(message), 36)]
@@ -398,11 +458,10 @@ class BTC_explorer(object):
         print("")
 
 
-
     def recv_peer_message(self, message, size):
 
         if size <= 0:
-            print("UNKNOWN MESSAGE: {}".format(message))
+            #print("UNKNOWN MESSAGE: {}".format(message))
             return
 
         # if there's no payload coming keep grabbing headers
@@ -454,14 +513,17 @@ class BTC_explorer(object):
 
             if self.received_command == 'inv':
                 #print(message)
-                print("Length of message on INV: {}".format(len(message)))
+                #print("Length of message on INV: {}".format(len(message)))
 
                 hashes, num_hashes = self.decode_recv_inv(message)
+
+                # used to check if desired block MY_BLOCk exists in
+                # this group of message data
 
                 blockfound = False
                 if self.block_height + num_hashes >= MY_BLOCK:
                     self.askBlocks = False
-                    print("My block is somwehere inside this data")
+                    # print("My block is somwehere inside this data")
                     blockfound = True
                 else:
                     # block number is larger
@@ -475,28 +537,31 @@ class BTC_explorer(object):
 
                 return
 
+            # decode incoming block messages
             if self.received_command == 'block':
-                print("DECODING BLOCK MESSAGE")
-                print("Length of block message: {}".format(len(message)))
+                #print("DECODING BLOCK MESSAGE")
+                #print("Length of block message: {}".format(len(message)))
 
                 self.payload_inbound = False
                 return
 
-            print("THE CURRENT COMMAND: {}".format(self.received_command))
+            #print("THE CURRENT COMMAND: {}".format(self.received_command))
 
     def filter_hashes(self, hashes, blockfound):
 
         # Get the last hash (500th block hash) from the list of hashes
 
-        print("Number of hashes: {}".format(len(hashes)))
+        print("Number of hashes in message: {}".format(len(hashes)))
 
         if blockfound:
             myblock_idx = MY_BLOCK % len(hashes)
-            hashite = hashes[MY_BLOCK % len(hashes)]
+            hashite = hashes[MY_BLOCK % len(hashes)-1]
             self.block_height += myblock_idx
             print("Block {} has been found".format(self.block_height))
+            self.MY_BLOCK_FOUND = True
+            self.askBlocks = False
         else:
-            print("get the last element from inventory")
+            #print("get the last element from inventory")
             hashite = hashes[-1]
 
         type = self.unmarshal_uint(hashite[:4])
@@ -504,9 +569,9 @@ class BTC_explorer(object):
 
         block_hash = self.swapLittle(block_hash).hex()
 
-        print("INV - MESSAGE TYPE: {}".format(type))
-        print("INV - BLOCK HASH: {}".format(block_hash))
-        print("INV - ORIGINAL BLOCK HASH: {}".format(hashite[4:].hex()))
+        #print("INV - MESSAGE TYPE: {}".format(type))
+        print("INV - BLOCK HASH: {}\n".format(block_hash))
+        #print("INV - ORIGINAL BLOCK HASH: {}".format(hashite[4:].hex()))
 
         hashite = hashite[4:]
         return block_hash, hashite
@@ -517,39 +582,12 @@ class BTC_explorer(object):
         temp.reverse()
         return temp
 
-    # TODO need to use this to check the checksum
-    def print_header(self, header, expected_cksum=None):
-        """
-        Report the contents of the given bitcoin message header
-        :param header: bitcoin message header (bytes or bytearray)
-        :param expected_cksum: the expected checksum for this version
-            message, if known
-        :return: message type
-        """
-        magic =header[:4]
-        command_hex =header[4:16]
-        payload_size = header[16:20]
-        cksum = header[20:]
-
-        command = str(bytearray([b for b in command_hex if b != 0]),
-                      encoding='utf-8')
-        psz = self.unmarshal_uint(payload_size)
-        if expected_cksum is None:
-            verified = ''
-        elif expected_cksum == cksum:
-            verified = '(verified)'
-        else:
-            verified = '(WRONG!! ' + expected_cksum.hex() + ')'
-        prefix = '  '
-        print(prefix + 'HEADER')
-        print(prefix + '-' * 56)
-        prefix *= 2
-        print('{}{:32} magic'.format(prefix, magic.hex()))
-        print('{}{:32} command: {}'.format(prefix, command_hex.hex(), command))
-        print(
-            '{}{:32} payload size: {}'.format(prefix, payload_size.hex(), psz))
-        print('{}{:32} checksum {}'.format(prefix, cksum.hex(), verified))
-        return command
+    def verify_checksum(self, checksum, expected_check_sum):
+        #TODO
+        #print("Checksum: {}".format(checksum))
+        #print("Expected Checksum: {}".format(expected_check_sum))
+        if expected_check_sum == checksum:
+            return True
 
 
     def btc_peer_connection(self):
@@ -610,14 +648,13 @@ BTC_EXPLORER.peerSocket.send(version_msg)
 
 while True:
 
-    # TODO create a single buffer to collect everything
+    # buffer will store all incoming messages
     buffer = b''
 
+    # check if peer has sent us data
     recv_message = BTC_EXPLORER.peerSocket.recv(8192)
-    #print("RECV MESSAGE: {}\n".format(recv_message))
 
-
-    # LITERALLY TO HANDLE THE INVENTORY MESSAGE
+    # while loop handles the inventory msgs could be adapted for all msgs
     message_size = len(recv_message)
     print("\nRECEIVED MESSAGE SIZE: {}".format(message_size))
     if message_size > 500:
@@ -625,35 +662,33 @@ while True:
         total_message_size = BTC_EXPLORER.get_payload_len(header)
 
         recv_message = recv_message[24:]
-        print("Expected Size: {}".format(total_message_size))
+        # print("Expected Size: {}".format(total_message_size))
         buffer += recv_message
-        print("length of buffer: {}".format(len(buffer)))
+        # print("length of buffer: {}".format(len(buffer)))
         while total_message_size != len(buffer):
-            print("length of buffer: {}".format(len(buffer)))
+            #print("length of buffer: {}".format(len(buffer)))
             recv_message = BTC_EXPLORER.peerSocket.recv(8192)
             buffer += recv_message
         recv_message = header + buffer
+
+        # when finished request data for particular block hash
         #BTC_EXPLORER.ask_for_data = True
 
-    print("default request")
+    # decode current message buffer
     BTC_EXPLORER.recv_peer_message(recv_message, message_size)
 
-
+    # check state variable to see if we need to ask for data
     if BTC_EXPLORER.ask_for_data:
-        print("\nCREATING GETDATA MESSAGE")
+        #print("\nCREATING GETDATA MESSAGE")
         getdata_message = BTC_EXPLORER.create_get_data_message()
-
-        print("message made")
         BTC_EXPLORER.peerSocket.send(getdata_message)
 
+    # check state variable to see if we need to ask for more blocks
     if BTC_EXPLORER.askBlocks:
-        print("\nCREATING GETBLOCKS MESSAGE")
+        #print("\nCREATING GETBLOCKS MESSAGE")
         if BTC_EXPLORER.next_block_hash == None:
             getblocks_msg = BTC_EXPLORER.create_get_block_message(BLOCK_GENESIS)
         else:
-
-            print("Trying to send a new block hash")
-            print(BTC_EXPLORER.next_block_hash[4:])
             getblocks_msg = BTC_EXPLORER.create_get_block_message(BTC_EXPLORER.next_block_hash)
 
         BTC_EXPLORER.peerSocket.send(getblocks_msg)
@@ -669,10 +704,15 @@ while True:
     time.sleep(1)
 
     if BTC_EXPLORER.read_fullMessage:
-        print("\nCREATING VERACK MESSAGE")
+        #print("\nCREATING VERACK MESSAGE")
         verack_msg = BTC_EXPLORER.create_verAck_message()
         BTC_EXPLORER.peerSocket.send(verack_msg)
         BTC_EXPLORER.read_fullMessage = False
+
+    if BTC_EXPLORER.MY_BLOCK_FOUND:
+        print("\nServices Rendered. Goodbye.")
+        BTC_EXPLORER.peerSocket.close()
+        break
 
 
 
